@@ -1,5 +1,5 @@
 import pandas as pd
-
+import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
@@ -23,6 +23,8 @@ model = RandomForestClassifier(
 
 model.fit(X_train, y_train)
 
+joblib.dump(model, "ml/leak_predictor.pkl")
+
 predictions = model.predict(X_test)
 
 accuracy = accuracy_score(y_test, predictions)
@@ -33,3 +35,5 @@ print("\nFeature Importance:")
 
 for feature, importance in zip(X.columns, model.feature_importances_):
     print(f"{feature}: {importance:.4f}")
+
+print("\nModel saved as ml/leak_predictor.pkl")
