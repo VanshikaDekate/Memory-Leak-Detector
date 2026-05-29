@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+  <title>Arduino Memory Leak Detector</title>
+
+  <style>
+
+    body {
+      background-color: #111;
+      color: white;
+      font-family: Arial;
+      padding: 20px;
+    }
+
+    h1 {
+      color: #00ff99;
+    }
+
+    .box {
+      background-color: #222;
+      padding: 20px;
+      margin-top: 20px;
+      border-radius: 10px;
+    }
+
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #00ff99;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    select {
+      background-color: #181818;
+      border: 1px solid #333;
+      border-radius: 5px;
+      color: white;
+      font-size: 16px;
+      margin-left: 10px;
+      padding: 9px;
+    }
+
+    .toolbar {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    pre,
+    .dashboard-output {
+      font-size: 16px;
+      max-height: 360px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    .dashboard-output {
+      color: #f5f5f5;
+      white-space: normal;
+    }
+
+    .dashboard-section {
+      margin-top: 18px;
+    }
+
+    .dashboard-section h3 {
+      color: #00ff99;
+      font-size: 17px;
+      margin: 0 0 10px;
+    }
+
+    .dashboard-status {
+      color: #00ff99;
+      font-weight: bold;
+    }
+
+    .leak-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .leak-card {
+      background-color: #181818;
+      border-left: 5px solid #00ff99;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .leak-card.severity-low {
+      border-left-color: #00ff99;
+    }
+
+    .leak-card.severity-medium {
+      border-left-color: #ffdd33;
+    }
+
+    .leak-card.severity-high {
+      border-left-color: #ff9900;
+    }
+
+    .leak-card.severity-critical {
+      border-left-color: #ff3333;
+    }
+
+    .leak-card-header {
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .severity-badge {
+      border-radius: 999px;
+      color: #111;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 8px;
+    }
+
+    .severity-low .severity-badge {
+      background-color: #00ff99;
+    }
+
+    .severity-medium .severity-badge {
+      background-color: #ffdd33;
+    }
+
+    .severity-high .severity-badge {
+      background-color: #ff9900;
+    }
+
+    .severity-critical .severity-badge {
+      background-color: #ff3333;
+      color: white;
+    }
+
+    .leak-detail {
+      color: #ddd;
+      margin: 4px 0;
+    }
+
+    .fragmentation-panel {
+      background-color: #181818;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .fragmentation-header {
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .fragmentation-percent {
+      color: #00ff99;
+      font-size: 22px;
+      font-weight: bold;
+    }
+
+    .fragmentation-bar {
+      background-color: #333;
+      border-radius: 999px;
+      height: 16px;
+      overflow: hidden;
+    }
+
+    .fragmentation-fill {
+      background-color: #00ff99;
+      height: 100%;
+      transition: width 0.2s ease, background-color 0.2s ease;
+      width: 0%;
+    }
+
+    .fragmentation-fill.level-medium {
+      background-color: #ffdd33;
+    }
+
+    .fragmentation-fill.level-high {
+      background-color: #ff9900;
+    }
+
+    .fragmentation-fill.level-critical {
+      background-color: #ff3333;
+    }
+
+    .fragmentation-metrics {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      margin-top: 12px;
+    }
+
+    .fragmentation-metric {
+      background-color: #202020;
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .fragmentation-label {
+      color: #aaa;
+      display: block;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .fragmentation-value {
+      color: #f5f5f5;
+      font-weight: bold;
+    }
+
+    .hotspot-table-wrap {
+      overflow-x: auto;
+    }
+
+    .hotspot-table {
+      border-collapse: collapse;
+      min-width: 420px;
+      width: 100%;
+    }
+
+    .hotspot-table th,
+    .hotspot-table td {
+      border-bottom: 1px solid #333;
+      padding: 10px;
+      text-align: left;
+    }
+
+    .hotspot-table th {
+      color: #00ff99;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    .hotspot-table td {
+      color: #ddd;
+    }
+
+    .hotspot-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .metric-line,
+    .event-line,
+    .empty-state {
+      color: #ccc;
+      margin: 4px 0;
+    }
+
+  </style>
+
+</head>
+
+<body>
+
+  <h1>Arduino Memory Leak Detector</h1>
+
+  <div class="toolbar">
+
+    <button id="connectButton" onclick="connectArduino()">Connect Arduino</button>
+
+    <select id="reportFormat" aria-label="Report format">
+      <option value="json">JSON</option>
+      <option value="txt">TXT</option>
+    </select>
+
+    <button onclick="downloadReport()">Download Report</button>
+
+  </div>
+
+  <div class="box">
+
+    <h2>Memory Report</h2>
+
+    <div id="output" class="dashboard-output">
+No Arduino Data Yet
+    </div>
+
+</div>
+
+<div class="box">
+
+    <h2>Test Your Own Code</h2>
+
+    <textarea id="userCode" rows="10" cols="60"></textarea>
+
+    <br><br>
+
+    <button onclick="analyzeCode()">
+        Analyze Code
+    </button>
+
+    <h3>Analysis Result:</h3>
+
+    <pre id="analysisOutput"></pre>
+
+</div>
+
+<script src="script.js"></script>
+</body>
+
+</html>
