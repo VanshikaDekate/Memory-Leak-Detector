@@ -1,586 +1,503 @@
-let port;
-let reader;
-let readableStreamClosed;
-const MAX_LOG_LINES = 500;
-const VALID_EVENTS = ["LEAK", "FRAGMENTATION", "BENCHMARK", "HOTSPOT", "OVERHEAD"];
-const runtimeState = {
-    connectionStatus: "DISCONNECTED",
-    activeLeaks: new Map(),
-    fragmentation: null,
-    benchmarks: {},
-    hotspots: new Map(),
-    overhead: null,
-    events: []
-};
-let pendingSerialText = "";
-let renderPending = false;
-let lastDashboardRender = "";
-let disconnectHandled = false;
+const CSV_COLUMNS = [
+    "allocSize",
+    "allocFrequency",
+    "reallocCount",
+    "grewByRealloc",
+    "activeAllocations",
+    "largestAllocation",
+    "totalAllocatedBytes",
+    "totalFreedBytes",
+    "fragmentationPercent",
+    "label"
+];
 
-async function connectArduino() {
+const MAX_LOG_LINES = 300;
+
+let port = null;
+let reader = null;
+let readableStreamClosed = null;
+let pendingSerialText = "";
+let isCollecting = false;
+
+const samples = [];
+const serialLines = [];
+
+const currentMetrics = {
+    allocSize: 0,
+    allocFrequency: 0,
+    reallocCount: 0,
+    grewByRealloc: 0,
+    activeAllocations: 0,
+    largestAllocation: 0,
+    totalAllocatedBytes: 0,
+    totalFreedBytes: 0,
+    fragmentationPercent: 0
+};
+
+const parserState = {
+    currentLeak: null,
+    currentHotspot: null,
+    pendingLeaks: []
+};
+
+document.addEventListener("DOMContentLoaded", function() {
+    document.getElementById("startButton").addEventListener("click", startCollection);
+    document.getElementById("stopButton").addEventListener("click", stopCollection);
+    document.getElementById("exportButton").addEventListener("click", exportCsv);
+
+    if(typeof navigator === "undefined" || !("serial" in navigator)) {
+        document.getElementById("supportWarning").style.display = "block";
+        document.getElementById("startButton").disabled = true;
+    }
+
+    render();
+});
+
+async function startCollection() {
+    if(isCollecting) {
+        return;
+    }
+
+    if(typeof navigator === "undefined" || !("serial" in navigator)) {
+        setStatus("WEB SERIAL NOT SUPPORTED");
+        return;
+    }
 
     try {
-
-        const output = document.getElementById("output");
-
-        if(typeof navigator === "undefined" || !("serial" in navigator)) {
-
-            resetRuntimeState();
-            addRuntimeEvent("SYSTEM", "Connection Failed");
-            setConnectionStatus("DISCONNECTED");
-            scheduleDashboardRender(output);
-
-            return;
-        }
-
-        if(runtimeState.connectionStatus === "CONNECTED" || runtimeState.connectionStatus === "RECONNECTING") {
-
-            return;
-        }
-
-        setConnectionStatus("RECONNECTING");
-        scheduleDashboardRender(output);
-
+        setStatus("REQUESTING PORT");
         port = await navigator.serial.requestPort();
-
         await port.open({ baudRate: 115200 });
 
         const decoder = new TextDecoderStream();
-
-        readableStreamClosed = port.readable.pipeTo(decoder.writable)
-        .catch(function(error) {
+        readableStreamClosed = port.readable.pipeTo(decoder.writable).catch(function(error) {
             console.log(error);
         });
-
         reader = decoder.readable.getReader();
 
-        resetRuntimeState();
         pendingSerialText = "";
-        disconnectHandled = false;
-        setConnectionStatus("CONNECTED");
-        addRuntimeEvent("SYSTEM", "Connected to Arduino...");
-        scheduleDashboardRender(output);
-
-        await readSerialData(output);
-
+        isCollecting = true;
+        setStatus("COLLECTING");
+        updateButtons();
+        readSerialLoop();
     }
-
     catch(error) {
-
-        await cleanupSerialConnection();
-
-        if(runtimeState.events.length === 0) {
-
-            resetRuntimeState();
-        }
-
-        setConnectionStatus("DISCONNECTED");
-        addRuntimeEvent("SYSTEM", "Connection Failed");
-        scheduleDashboardRender(document.getElementById("output"));
-
         console.log(error);
+        await cleanupSerial();
+        isCollecting = false;
+        setStatus("DISCONNECTED");
+        updateButtons();
     }
 }
 
-async function readSerialData(output) {
+async function stopCollection() {
+    isCollecting = false;
+    setStatus("STOPPING");
+    await cleanupSerial();
+    setStatus("STOPPED");
+    updateButtons();
+}
 
+async function readSerialLoop() {
     try {
+        while(isCollecting && reader) {
+            const result = await reader.read();
 
-        while(true) {
-
-            const { value, done } = await reader.read();
-
-            if(done) {
-
-                await handleSerialDisconnect(output);
-
+            if(result.done) {
                 break;
             }
 
-            if(value) {
-
-                processSerialChunk(output, value);
-
-                await new Promise(requestAnimationFrame);
+            if(result.value) {
+                processSerialChunk(result.value);
             }
         }
     }
-
     catch(error) {
-
         console.log(error);
-        await handleSerialDisconnect(output);
+    }
+    finally {
+        if(isCollecting) {
+            isCollecting = false;
+            await cleanupSerial();
+            setStatus("DISCONNECTED");
+            updateButtons();
+        }
     }
 }
 
-function processSerialChunk(output, chunk) {
-
+function processSerialChunk(chunk) {
     pendingSerialText += chunk;
 
     const lines = pendingSerialText.split(/\r?\n/);
     pendingSerialText = lines.pop();
 
     for(const line of lines) {
+        const trimmed = line.trim();
 
-        if(line.trim() !== "") {
-
-            processSerialLine(output, line);
+        if(trimmed !== "") {
+            processSerialLine(trimmed);
         }
     }
 }
 
-function processSerialLine(output, line) {
+function processSerialLine(line) {
+    appendSerialLog(line);
 
-    const packet = parseSerialPacket(line);
+    const sample = parseSampleLine(line);
 
-    if(!packet) {
-
-        return;
+    if(sample) {
+        if(Array.isArray(sample)) {
+            for(const item of sample) {
+                appendSample(item);
+            }
+        }
+        else {
+            appendSample(sample);
+        }
     }
 
-    updateRuntimeState(packet);
-    scheduleDashboardRender(output);
+    render();
 }
 
-function parseSerialPacket(line) {
+function parseSampleLine(line) {
+    const mlSample = parseMLFeatureLine(line);
 
-    let event;
+    if(mlSample) {
+        return mlSample;
+    }
+
+    const jsonSample = parseJsonSample(line);
+
+    if(jsonSample) {
+        return jsonSample;
+    }
+
+    const metricSample = parseKeyValueMetricLine(line);
+
+    if(metricSample) {
+        return metricSample;
+    }
+
+    return parseMleakTextLine(line);
+}
+
+function parseMLFeatureLine(line) {
+    if(!line.startsWith("ML,")) {
+        return null;
+    }
+
+    const values = line.split(",");
+
+    if(values.length < 10) {
+        return null;
+    }
+
+    return normalizeSample({
+        allocSize: values[1],
+        allocFrequency: values[2],
+        reallocCount: values[3],
+        grewByRealloc: values[4],
+        activeAllocations: values[5],
+        largestAllocation: values[6],
+        totalAllocatedBytes: values[7],
+        totalFreedBytes: values[8],
+        fragmentationPercent: values[9],
+        label: getSelectedLabel()
+    });
+}
+
+function parseJsonSample(line) {
+    let data;
 
     try {
-
-        event = JSON.parse(line);
-
+        data = JSON.parse(line);
     }
-
     catch(error) {
-
         return null;
     }
 
-    if(!event || !VALID_EVENTS.includes(event.event)) {
-
+    if(!data || typeof data !== "object") {
         return null;
     }
 
-    return event;
+    if(data.event === "FRAGMENTATION") {
+        currentMetrics.totalAllocatedBytes = toNumber(data.totalAllocated ?? data.totalAllocatedBytes ?? data.allocated, currentMetrics.totalAllocatedBytes);
+        currentMetrics.totalFreedBytes = toNumber(data.totalFreed ?? data.totalFreedBytes ?? data.freed, currentMetrics.totalFreedBytes);
+        currentMetrics.activeAllocations = toNumber(data.activeAllocations ?? data.active, currentMetrics.activeAllocations);
+        currentMetrics.largestAllocation = toNumber(data.largestAllocation ?? data.largest, currentMetrics.largestAllocation);
+        currentMetrics.fragmentationPercent = toNumber(data.fragmentationPercent ?? data.percent ?? data.fragmentation, currentMetrics.fragmentationPercent);
+        return null;
+    }
+
+    if(data.event === "HOTSPOT") {
+        currentMetrics.allocFrequency = toNumber(data.allocFrequency ?? data.allocationCount ?? data.count ?? data.hits, currentMetrics.allocFrequency);
+        return null;
+    }
+
+    if(data.event === "LEAK" || data.event === "SAMPLE" || hasAnyMetricField(data)) {
+        return normalizeSample(data);
+    }
+
+    return null;
 }
 
-function updateRuntimeState(packet) {
-
-    const timestamp = new Date();
-
-    if(packet.event === "LEAK") {
-
-        updateActiveLeaks(packet, timestamp);
+function parseKeyValueMetricLine(line) {
+    if(!line.includes("=")) {
+        return null;
     }
 
-    if(packet.event === "FRAGMENTATION") {
+    const data = {};
+    const pairs = line.split(/[,\s]+/);
 
-        runtimeState.fragmentation = {
-            totalAllocated: packet.totalAllocated ?? packet.allocated ?? 0,
-            totalFreed: packet.totalFreed ?? packet.freed ?? 0,
-            activeAllocations: packet.activeAllocations ?? packet.active ?? 0,
-            percent: packet.percent ?? packet.fragmentation ?? 0,
-            severity: packet.severity,
-            updatedAt: timestamp
-        };
-    }
+    for(const pair of pairs) {
+        const index = pair.indexOf("=");
 
-    if(packet.event === "BENCHMARK") {
-
-        runtimeState.benchmarks = {
-            bytes: packet.bytes,
-            micros: packet.micros,
-            updatedAt: timestamp
-        };
-    }
-
-    if(packet.event === "HOTSPOT") {
-
-        const key = packet.caller || packet.function || "unknown";
-
-        runtimeState.hotspots.set(key, {
-            caller: key,
-            allocationCount: packet.allocationCount ?? packet.count ?? packet.hits ?? 0,
-            totalAllocatedBytes: packet.totalAllocatedBytes ?? packet.totalBytes ?? packet.bytes ?? 0,
-            updatedAt: timestamp
-        });
-    }
-
-    if(packet.event === "OVERHEAD") {
-
-        runtimeState.overhead = {
-            bytes: packet.bytes,
-            total: packet.total,
-            updatedAt: timestamp
-        };
-    }
-
-    addRuntimeEvent(packet.event, formatPacketSummary(packet), timestamp);
-}
-
-function updateActiveLeaks(packet, timestamp) {
-
-    const key = packet.id || `${packet.caller || "unknown"}:${packet.size || 0}`;
-    const cleared = packet.active === false || packet.status === "CLEARED";
-
-    if(cleared) {
-
-        runtimeState.activeLeaks.delete(key);
-
-        return;
-    }
-
-    runtimeState.activeLeaks.set(key, {
-        size: packet.size,
-        severity: packet.severity,
-        leakType: packet.leakType || packet.type || "UNKNOWN",
-        caller: packet.caller || "unknown",
-        updatedAt: timestamp
-    });
-}
-
-function addRuntimeEvent(type, message, timestamp = new Date()) {
-
-    runtimeState.events.push({
-        type,
-        message,
-        timestamp
-    });
-
-    if(runtimeState.events.length > MAX_LOG_LINES) {
-
-        runtimeState.events.splice(0, runtimeState.events.length - MAX_LOG_LINES);
-    }
-}
-
-function scheduleDashboardRender(output) {
-
-    if(renderPending) {
-
-        return;
-    }
-
-    renderPending = true;
-
-    requestAnimationFrame(function() {
-        renderPending = false;
-        renderDashboard(output);
-    });
-}
-
-function renderDashboard(output) {
-
-    const nextRender = buildDashboardHtml();
-
-    if(nextRender === lastDashboardRender) {
-
-        return;
-    }
-
-    output.innerHTML = nextRender;
-    output.scrollTop = output.scrollHeight;
-    lastDashboardRender = nextRender;
-}
-
-function buildDashboardHtml() {
-
-    const lines = [];
-
-    lines.push(`<div class="dashboard-status">Status: ${escapeHtml(runtimeState.connectionStatus)}</div>`);
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Active Leaks</h3>`);
-
-    if(runtimeState.activeLeaks.size === 0) {
-
-        lines.push(`<div class="empty-state">None</div>`);
-    }
-    else {
-
-        lines.push(`<div class="leak-grid">`);
-
-        for(const leak of runtimeState.activeLeaks.values()) {
-
-            lines.push(renderLeakCard(leak));
+        if(index <= 0) {
+            continue;
         }
 
-        lines.push(`</div>`);
+        const key = pair.slice(0, index).trim();
+        const value = pair.slice(index + 1).trim();
+
+        data[key] = value;
     }
 
-    lines.push(`</section>`);
-
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Fragmentation</h3>`);
-    lines.push(runtimeState.fragmentation ? renderFragmentationPanel(runtimeState.fragmentation) : `<div class="empty-state">No data</div>`);
-    lines.push(`</section>`);
-
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Benchmark Metrics</h3>`);
-    lines.push(Object.keys(runtimeState.benchmarks).length ? `<div class="metric-line">${escapeHtml(formatMetric(runtimeState.benchmarks, ["bytes", "micros"]))}</div>` : `<div class="empty-state">No data</div>`);
-    lines.push(`</section>`);
-
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Allocation Hotspots</h3>`);
-    lines.push(renderHotspotTable());
-    lines.push(`</section>`);
-
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Overhead</h3>`);
-    lines.push(runtimeState.overhead ? `<div class="metric-line">${escapeHtml(formatMetric(runtimeState.overhead, ["bytes", "total"]))}</div>` : `<div class="empty-state">No data</div>`);
-    lines.push(`</section>`);
-
-    lines.push(`<section class="dashboard-section">`);
-    lines.push(`<h3>Recent Events</h3>`);
-
-    if(runtimeState.events.length === 0) {
-
-        lines.push(`<div class="empty-state">No serial events yet</div>`);
+    if(!hasAnyMetricField(data)) {
+        return null;
     }
 
-    for(const event of runtimeState.events) {
+    return normalizeSample(data);
+}
 
-        lines.push(`<div class="event-line">[${escapeHtml(formatTimestamp(event.timestamp))}] ${escapeHtml(event.type)}: ${escapeHtml(event.message)}</div>`);
+function parseMleakTextLine(line) {
+    let match;
+
+    match = line.match(/^Leak Detected:\s*([0-9]+)\s*bytes/i);
+    if(match) {
+        parserState.currentLeak = {
+            allocSize: Number(match[1]),
+            reallocCount: 0,
+            grewByRealloc: 0
+        };
+        parserState.pendingLeaks.push(parserState.currentLeak);
+        currentMetrics.allocSize = Number(match[1]);
+        return null;
     }
 
-    lines.push(`</section>`);
-
-    return lines.join("");
-}
-
-function renderLeakCard(leak) {
-
-    const severity = normalizeSeverity(leak.severity);
-    const severityClass = `severity-${severity.toLowerCase()}`;
-
-    return `
-        <article class="leak-card ${severityClass}">
-            <div class="leak-card-header">
-                <strong>${escapeHtml(leak.leakType)}</strong>
-                <span class="severity-badge">${escapeHtml(severity)}</span>
-            </div>
-            <div class="leak-detail">Size: ${escapeHtml(leak.size)} bytes</div>
-            <div class="leak-detail">Severity: ${escapeHtml(severity)}</div>
-            <div class="leak-detail">Caller: ${escapeHtml(leak.caller)}</div>
-            <div class="leak-detail">Type: ${escapeHtml(leak.leakType)}</div>
-            <div class="leak-detail">Updated: ${escapeHtml(formatTimestamp(leak.updatedAt))}</div>
-        </article>
-    `;
-}
-
-function renderFragmentationPanel(fragmentation) {
-
-    const percent = clampPercent(fragmentation.percent);
-    const level = getFragmentationLevel(percent);
-
-    return `
-        <div class="fragmentation-panel">
-            <div class="fragmentation-header">
-                <strong>Heap Fragmentation</strong>
-                <span class="fragmentation-percent">${escapeHtml(percent)}%</span>
-            </div>
-            <div class="fragmentation-bar" aria-label="Fragmentation ${escapeHtml(percent)}%">
-                <div class="fragmentation-fill ${level}" style="width: ${escapeHtml(percent)}%"></div>
-            </div>
-            <div class="fragmentation-metrics">
-                ${renderFragmentationMetric("Total Allocated", fragmentation.totalAllocated, "bytes")}
-                ${renderFragmentationMetric("Total Freed", fragmentation.totalFreed, "bytes")}
-                ${renderFragmentationMetric("Active Allocations", fragmentation.activeAllocations, "")}
-                ${renderFragmentationMetric("Updated", formatTimestamp(fragmentation.updatedAt), "")}
-            </div>
-        </div>
-    `;
-}
-
-function renderFragmentationMetric(label, value, unit) {
-
-    const suffix = unit ? ` ${unit}` : "";
-
-    return `
-        <div class="fragmentation-metric">
-            <span class="fragmentation-label">${escapeHtml(label)}</span>
-            <span class="fragmentation-value">${escapeHtml(value)}${escapeHtml(suffix)}</span>
-        </div>
-    `;
-}
-
-function renderHotspotTable() {
-
-    if(runtimeState.hotspots.size === 0) {
-
-        return `<div class="empty-state">None</div>`;
+    match = line.match(/^Realloc count:\s*([0-9]+)/i);
+    if(match && parserState.currentLeak) {
+        parserState.currentLeak.reallocCount = Number(match[1]);
+        currentMetrics.reallocCount = Number(match[1]);
+        currentMetrics.grewByRealloc = Number(match[1]) > 0 ? 1 : currentMetrics.grewByRealloc;
+        return null;
     }
 
-    const hotspots = Array.from(runtimeState.hotspots.values())
-    .sort(function(left, right) {
-        return Number(right.allocationCount) - Number(left.allocationCount);
+    match = line.match(/^Total Allocated:\s*([0-9]+)/i);
+    if(match) {
+        currentMetrics.totalAllocatedBytes = Number(match[1]);
+        return null;
+    }
+
+    match = line.match(/^Total Freed:\s*([0-9]+)/i);
+    if(match) {
+        currentMetrics.totalFreedBytes = Number(match[1]);
+        return null;
+    }
+
+    match = line.match(/^Active Allocations:\s*([0-9]+)/i);
+    if(match) {
+        currentMetrics.activeAllocations = Number(match[1]);
+        return null;
+    }
+
+    match = line.match(/^Largest Allocation:\s*([0-9]+)/i);
+    if(match) {
+        currentMetrics.largestAllocation = Number(match[1]);
+        return null;
+    }
+
+    match = line.match(/^Estimated Fragmentation:\s*([0-9.]+)/i);
+    if(match) {
+        currentMetrics.fragmentationPercent = Number(match[1]);
+        return finalizePendingTextLeaks();
+    }
+
+    match = line.match(/^Allocations:\s*([0-9]+)/i);
+    if(match) {
+        parserState.currentHotspot = Number(match[1]);
+        currentMetrics.allocFrequency = Number(match[1]);
+        return null;
+    }
+
+    match = line.match(/^Bytes Allocated:\s*([0-9]+)/i);
+    if(match && parserState.currentHotspot !== null) {
+        currentMetrics.allocFrequency = parserState.currentHotspot;
+        parserState.currentHotspot = null;
+        return null;
+    }
+
+    return null;
+}
+
+function finalizePendingTextLeaks() {
+    if(parserState.pendingLeaks.length === 0) {
+        return null;
+    }
+
+    const finalized = parserState.pendingLeaks.map(function(leak) {
+        return normalizeSample({
+            ...currentMetrics,
+            ...leak
+        });
     });
 
-    const rows = hotspots.map(function(hotspot) {
+    parserState.pendingLeaks.length = 0;
+    parserState.currentLeak = null;
+    return finalized;
+}
+
+function normalizeSample(data) {
+    const sample = {
+        allocSize: toNumber(data.allocSize ?? data.size ?? data.bytes, currentMetrics.allocSize),
+        allocFrequency: toNumber(data.allocFrequency ?? data.frequency ?? data.allocationCount ?? data.count ?? data.hits, currentMetrics.allocFrequency),
+        reallocCount: toNumber(data.reallocCount, currentMetrics.reallocCount),
+        grewByRealloc: toBooleanNumber(data.grewByRealloc ?? data.grew ?? data.growing, currentMetrics.grewByRealloc),
+        activeAllocations: toNumber(data.activeAllocations ?? data.active, currentMetrics.activeAllocations),
+        largestAllocation: toNumber(data.largestAllocation ?? data.largest, currentMetrics.largestAllocation),
+        totalAllocatedBytes: toNumber(data.totalAllocatedBytes ?? data.totalAllocated ?? data.allocated, currentMetrics.totalAllocatedBytes),
+        totalFreedBytes: toNumber(data.totalFreedBytes ?? data.totalFreed ?? data.freed, currentMetrics.totalFreedBytes),
+        fragmentationPercent: toNumber(data.fragmentationPercent ?? data.fragmentation ?? data.percent, currentMetrics.fragmentationPercent),
+        label: normalizeLabel(data.label || getSelectedLabel())
+    };
+
+    Object.assign(currentMetrics, {
+        allocSize: sample.allocSize,
+        allocFrequency: sample.allocFrequency,
+        reallocCount: sample.reallocCount,
+        grewByRealloc: sample.grewByRealloc,
+        activeAllocations: sample.activeAllocations,
+        largestAllocation: sample.largestAllocation,
+        totalAllocatedBytes: sample.totalAllocatedBytes,
+        totalFreedBytes: sample.totalFreedBytes,
+        fragmentationPercent: sample.fragmentationPercent
+    });
+
+    return sample;
+}
+
+function appendSample(sample) {
+    samples.push({
+        ...sample,
+        timestamp: new Date().toISOString()
+    });
+}
+
+function exportCsv() {
+    if(samples.length === 0) {
+        return;
+    }
+
+    const header = CSV_COLUMNS.join(",");
+    const rows = samples.map(function(sample) {
+        return CSV_COLUMNS.map(function(column) {
+            return csvEscape(sample[column]);
+        }).join(",");
+    });
+
+    downloadBlob([header, ...rows].join("\n"), "mleak_runtime_metrics.csv", "text/csv");
+}
+
+function render() {
+    for(const key of Object.keys(currentMetrics)) {
+        const element = document.getElementById(key);
+
+        if(element) {
+            element.textContent = currentMetrics[key];
+        }
+    }
+
+    document.getElementById("sampleCount").textContent = samples.length;
+    document.getElementById("connectionStatus").textContent = isCollecting ? "COLLECTING" : document.getElementById("connectionStatus").textContent;
+    renderSampleTable();
+    renderSerialLog();
+    updateButtons();
+}
+
+function renderSampleTable() {
+    const body = document.getElementById("sampleTableBody");
+
+    if(samples.length === 0) {
+        body.innerHTML = `<tr><td class="empty-state" colspan="12">No samples collected yet.</td></tr>`;
+        return;
+    }
+
+    body.innerHTML = samples.map(function(sample, index) {
         return `
             <tr>
-                <td>${escapeHtml(hotspot.caller)}</td>
-                <td>${escapeHtml(hotspot.allocationCount)}</td>
-                <td>${escapeHtml(hotspot.totalAllocatedBytes)}</td>
+                <td>${index + 1}</td>
+                <td>${escapeHtml(sample.allocSize)}</td>
+                <td>${escapeHtml(sample.allocFrequency)}</td>
+                <td>${escapeHtml(sample.reallocCount)}</td>
+                <td>${escapeHtml(sample.grewByRealloc)}</td>
+                <td>${escapeHtml(sample.activeAllocations)}</td>
+                <td>${escapeHtml(sample.largestAllocation)}</td>
+                <td>${escapeHtml(sample.totalAllocatedBytes)}</td>
+                <td>${escapeHtml(sample.totalFreedBytes)}</td>
+                <td>${escapeHtml(sample.fragmentationPercent)}</td>
+                <td>${escapeHtml(sample.label)}</td>
+                <td>${escapeHtml(sample.timestamp)}</td>
             </tr>
         `;
-    });
-
-    return `
-        <div class="hotspot-table-wrap">
-            <table class="hotspot-table">
-                <thead>
-                    <tr>
-                        <th>Caller Address</th>
-                        <th>Allocation Count</th>
-                        <th>Total Allocated Bytes</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${rows.join("")}
-                </tbody>
-            </table>
-        </div>
-    `;
+    }).join("");
 }
 
-function clampPercent(value) {
+function appendSerialLog(line) {
+    serialLines.push(line);
 
-    const percent = Number(value);
-
-    if(Number.isNaN(percent)) {
-
-        return 0;
+    if(serialLines.length > MAX_LOG_LINES) {
+        serialLines.splice(0, serialLines.length - MAX_LOG_LINES);
     }
 
-    return Math.max(0, Math.min(100, Math.round(percent)));
+    renderSerialLog();
 }
 
-function getFragmentationLevel(percent) {
+function renderSerialLog() {
+    const log = document.getElementById("serialLog");
 
-    if(percent >= 75) {
-
-        return "level-critical";
-    }
-
-    if(percent >= 50) {
-
-        return "level-high";
-    }
-
-    if(percent >= 25) {
-
-        return "level-medium";
-    }
-
-    return "";
-}
-
-function normalizeSeverity(severity) {
-
-    const normalized = String(severity || "LOW").toUpperCase();
-
-    if(["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(normalized)) {
-
-        return normalized;
-    }
-
-    return "LOW";
-}
-
-function formatMetric(metric, keys) {
-
-    const values = keys
-    .filter(function(key) {
-        return metric[key] !== undefined;
-    })
-    .map(function(key) {
-        return `${key}=${metric[key]}`;
-    });
-
-    return `${formatTimestamp(metric.updatedAt)} ${values.join(", ")}`;
-}
-
-function formatPacketSummary(packet) {
-
-    const fields = [];
-
-    for(const key in packet) {
-
-        if(key !== "event") {
-
-            fields.push(`${key}=${packet[key]}`);
-        }
-    }
-
-    return fields.join(", ");
-}
-
-function formatTimestamp(timestamp) {
-
-    return timestamp.toLocaleTimeString();
-}
-
-function setConnectionStatus(status) {
-
-    runtimeState.connectionStatus = status;
-    updateConnectButton();
-}
-
-function updateConnectButton() {
-
-    const connectButton = document.getElementById("connectButton");
-
-    if(!connectButton) {
-
+    if(!log) {
         return;
     }
 
-    connectButton.disabled = runtimeState.connectionStatus === "CONNECTED" ||
-    runtimeState.connectionStatus === "RECONNECTING";
+    log.textContent = serialLines.length ? serialLines.join("\n") : "Waiting for serial data...";
+    log.scrollTop = log.scrollHeight;
 }
 
-async function handleSerialDisconnect(output) {
+function updateButtons() {
+    document.getElementById("startButton").disabled = isCollecting || !("serial" in navigator);
+    document.getElementById("stopButton").disabled = !isCollecting;
+    document.getElementById("exportButton").disabled = samples.length === 0;
+}
 
-    if(disconnectHandled) {
+function setStatus(status) {
+    const element = document.getElementById("connectionStatus");
 
-        return;
+    if(element) {
+        element.textContent = status;
     }
-
-    disconnectHandled = true;
-    setConnectionStatus("RECONNECTING");
-    addRuntimeEvent("SYSTEM", "Reconnecting...");
-    renderDashboard(output);
-
-    await cleanupSerialConnection();
-
-    setConnectionStatus("DISCONNECTED");
-    addRuntimeEvent("SYSTEM", "Disconnected");
-    scheduleDashboardRender(output);
 }
 
-async function cleanupSerialConnection() {
-
+async function cleanupSerial() {
     if(reader) {
-
         try {
-
             await reader.cancel();
-
         }
-
         catch(error) {
-
             console.log(error);
         }
 
         try {
-
             reader.releaseLock();
-
         }
-
         catch(error) {
-
             console.log(error);
         }
 
@@ -588,15 +505,10 @@ async function cleanupSerialConnection() {
     }
 
     if(readableStreamClosed) {
-
         try {
-
             await readableStreamClosed;
-
         }
-
         catch(error) {
-
             console.log(error);
         }
 
@@ -604,15 +516,10 @@ async function cleanupSerialConnection() {
     }
 
     if(port) {
-
         try {
-
             await port.close();
-
         }
-
         catch(error) {
-
             console.log(error);
         }
 
@@ -620,109 +527,65 @@ async function cleanupSerialConnection() {
     }
 }
 
-function downloadReport() {
-
-    const formatSelect = document.getElementById("reportFormat");
-    const format = formatSelect ? formatSelect.value : "json";
-    const report = createDiagnosticsReport();
-
-    if(format === "txt") {
-
-        downloadBlob(
-            formatDiagnosticsText(report),
-            "arduino-runtime-report.txt",
-            "text/plain"
-        );
-
-        return;
-    }
-
-    downloadBlob(
-        JSON.stringify(report, null, 2),
-        "arduino-runtime-report.json",
-        "application/json"
-    );
+function hasAnyMetricField(data) {
+    return [
+        "allocSize",
+        "size",
+        "allocFrequency",
+        "reallocCount",
+        "grewByRealloc",
+        "activeAllocations",
+        "largestAllocation",
+        "totalAllocatedBytes",
+        "totalFreedBytes",
+        "fragmentationPercent"
+    ].some(function(key) {
+        return Object.prototype.hasOwnProperty.call(data, key);
+    });
 }
 
-function createDiagnosticsReport() {
+function toNumber(value, fallback) {
+    const number = Number(value);
 
-    return {
-        generatedAt: new Date().toISOString(),
-        connectionStatus: runtimeState.connectionStatus,
-        leaks: Array.from(runtimeState.activeLeaks.values()).map(serializeTimestampedItem),
-        fragmentation: serializeTimestampedItem(runtimeState.fragmentation),
-        benchmarks: Object.keys(runtimeState.benchmarks).length ? serializeTimestampedItem(runtimeState.benchmarks) : null,
-        hotspots: Array.from(runtimeState.hotspots.values())
-        .sort(function(left, right) {
-            return Number(right.allocationCount) - Number(left.allocationCount);
-        })
-        .map(serializeTimestampedItem)
-    };
+    return Number.isFinite(number) ? number : Number(fallback || 0);
 }
 
-function serializeTimestampedItem(item) {
-
-    if(!item) {
-
-        return null;
+function toBooleanNumber(value, fallback) {
+    if(value === true || value === "true" || value === "TRUE") {
+        return 1;
     }
 
-    const serialized = {};
-
-    for(const key in item) {
-
-        serialized[key] = item[key] instanceof Date ? item[key].toISOString() : item[key];
+    if(value === false || value === "false" || value === "FALSE") {
+        return 0;
     }
 
-    return serialized;
+    return toNumber(value, fallback) ? 1 : 0;
 }
 
-function formatDiagnosticsText(report) {
+function normalizeLabel(label) {
+    const normalized = String(label || "NORMAL").toUpperCase();
+    const validLabels = ["NORMAL", "LEAK", "GROWING_LEAK", "FRAGMENTED"];
 
-    const lines = [];
+    return validLabels.includes(normalized) ? normalized : "NORMAL";
+}
 
-    lines.push("Arduino Runtime Diagnostics Report");
-    lines.push(`Generated At: ${report.generatedAt}`);
-    lines.push(`Connection Status: ${report.connectionStatus}`);
-    lines.push("");
-    lines.push("Leaks");
+function getSelectedLabel() {
+    const select = document.getElementById("labelSelect");
 
-    if(report.leaks.length === 0) {
+    return select ? select.value : "NORMAL";
+}
 
-        lines.push("  None");
+function csvEscape(value) {
+    const text = String(value ?? "");
+
+    if(/[",\n\r]/.test(text)) {
+        return `"${text.replace(/"/g, '""')}"`;
     }
 
-    for(const leak of report.leaks) {
-
-        lines.push(`  size=${leak.size}, severity=${leak.severity}, caller=${leak.caller}, type=${leak.leakType}, updatedAt=${leak.updatedAt}`);
-    }
-
-    lines.push("");
-    lines.push("Fragmentation");
-    lines.push(report.fragmentation ? `  totalAllocated=${report.fragmentation.totalAllocated}, totalFreed=${report.fragmentation.totalFreed}, activeAllocations=${report.fragmentation.activeAllocations}, percent=${report.fragmentation.percent}, updatedAt=${report.fragmentation.updatedAt}` : "  No data");
-
-    lines.push("");
-    lines.push("Benchmarks");
-    lines.push(report.benchmarks ? `  bytes=${report.benchmarks.bytes}, micros=${report.benchmarks.micros}, updatedAt=${report.benchmarks.updatedAt}` : "  No data");
-
-    lines.push("");
-    lines.push("Hotspots");
-
-    if(report.hotspots.length === 0) {
-
-        lines.push("  None");
-    }
-
-    for(const hotspot of report.hotspots) {
-
-        lines.push(`  caller=${hotspot.caller}, allocationCount=${hotspot.allocationCount}, totalAllocatedBytes=${hotspot.totalAllocatedBytes}, updatedAt=${hotspot.updatedAt}`);
-    }
-
-    return lines.join("\n");
+    return text;
 }
 
 function downloadBlob(content, filename, type) {
-
     const blob = new Blob([content], { type });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -736,8 +599,7 @@ function downloadBlob(content, filename, type) {
 }
 
 function escapeHtml(value) {
-
-    return String(value)
+    return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -745,78 +607,20 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function resetRuntimeState() {
-
-    runtimeState.connectionStatus = "DISCONNECTED";
-    runtimeState.activeLeaks.clear();
-    runtimeState.fragmentation = null;
-    runtimeState.benchmarks = {};
-    runtimeState.hotspots.clear();
-    runtimeState.overhead = null;
-    runtimeState.events.length = 0;
-    lastDashboardRender = "";
-    updateConnectButton();
-}
-
 if(typeof navigator !== "undefined" && "serial" in navigator) {
-
     navigator.serial.addEventListener("disconnect", function(event) {
-
         if(event.target === port) {
-
-            handleSerialDisconnect(document.getElementById("output"));
+            stopCollection();
         }
     });
 }
 
 if(typeof window !== "undefined") {
-
     window.addEventListener("pagehide", function() {
-
-        cleanupSerialConnection();
+        cleanupSerial();
     });
 
     window.addEventListener("beforeunload", function() {
-
-        cleanupSerialConnection();
+        cleanupSerial();
     });
-
-}
-
-function analyzeCode() {
-
-    let code =
-    document.getElementById("userCode").value;
-
-    let result = "";
-
-    if(code.includes("malloc(")) {
-
-        result += "Memory Allocation Detected\n";
-    }
-
-    if(code.includes("free(")) {
-
-        result += "Memory Free Detected\n";
-    }
-
-    if(code.includes("malloc(") &&
-       !code.includes("free(")) {
-
-        result += "Possible Memory Leak\n";
-    }
-
-    if(code.includes("malloc(") &&
-       code.includes("free(")) {
-
-        result += "No Leak Detected\n";
-    }
-
-    if(result === "") {
-
-        result = "No Memory Operations Found";
-    }
-
-    document.getElementById("analysisOutput")
-    .innerText = result;
 }

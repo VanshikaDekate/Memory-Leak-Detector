@@ -1,314 +1,312 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-
-  <title>Arduino Memory Leak Detector</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mleak-rt Data Collector</title>
 
   <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #181b1f;
+      --panel-2: #20242a;
+      --border: #303741;
+      --text: #f3f6f8;
+      --muted: #aab3bd;
+      --accent: #14d990;
+      --accent-2: #46a3ff;
+      --danger: #ff5c5c;
+      --warning: #ffd166;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
 
     body {
-      background-color: #111;
-      color: white;
-      font-family: Arial;
-      padding: 20px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 0;
+      padding: 24px;
+    }
+
+    main {
+      margin: 0 auto;
+      max-width: 1280px;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
     }
 
     h1 {
-      color: #00ff99;
+      color: var(--accent);
+      font-size: 30px;
     }
 
-    .box {
-      background-color: #222;
-      padding: 20px;
-      margin-top: 20px;
-      border-radius: 10px;
+    h2 {
+      font-size: 18px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin: 8px 0 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-top: 18px;
+      padding: 18px;
+    }
+
+    .toolbar {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .control {
+      display: grid;
+      gap: 6px;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    button,
+    select {
+      border-radius: 6px;
+      font-size: 15px;
+      min-height: 40px;
+      padding: 9px 12px;
     }
 
     button {
-      padding: 10px 20px;
-      font-size: 16px;
-      background-color: #00ff99;
-      border: none;
-      border-radius: 5px;
+      background: var(--accent);
+      border: 0;
+      color: #07100c;
       cursor: pointer;
+      font-weight: bold;
+    }
+
+    button.secondary {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    button.danger {
+      background: var(--danger);
+      color: white;
     }
 
     button:disabled {
       cursor: not-allowed;
-      opacity: 0.55;
+      opacity: 0.5;
     }
 
     select {
-      background-color: #181818;
-      border: 1px solid #333;
-      border-radius: 5px;
-      color: white;
-      font-size: 16px;
-      margin-left: 10px;
-      padding: 9px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      min-width: 170px;
     }
 
-    .toolbar {
+    .status-strip {
       align-items: center;
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
+      justify-content: space-between;
     }
 
-    pre,
-    .dashboard-output {
-      font-size: 16px;
-      max-height: 360px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-    }
-
-    .dashboard-output {
-      color: #f5f5f5;
-      white-space: normal;
-    }
-
-    .dashboard-section {
-      margin-top: 18px;
-    }
-
-    .dashboard-section h3 {
-      color: #00ff99;
-      font-size: 17px;
-      margin: 0 0 10px;
-    }
-
-    .dashboard-status {
-      color: #00ff99;
+    .status {
+      color: var(--accent);
       font-weight: bold;
     }
 
-    .leak-grid {
-      display: grid;
-      gap: 10px;
+    .support-warning {
+      color: var(--warning);
+      display: none;
+      margin-top: 10px;
     }
 
-    .leak-card {
-      background-color: #181818;
-      border-left: 5px solid #00ff99;
+    .metric-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      margin-top: 14px;
+    }
+
+    .metric-card {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px;
     }
 
-    .leak-card.severity-low {
-      border-left-color: #00ff99;
-    }
-
-    .leak-card.severity-medium {
-      border-left-color: #ffdd33;
-    }
-
-    .leak-card.severity-high {
-      border-left-color: #ff9900;
-    }
-
-    .leak-card.severity-critical {
-      border-left-color: #ff3333;
-    }
-
-    .leak-card-header {
-      align-items: center;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 10px;
-    }
-
-    .severity-badge {
-      border-radius: 999px;
-      color: #111;
-      font-size: 12px;
-      font-weight: bold;
-      padding: 4px 8px;
-    }
-
-    .severity-low .severity-badge {
-      background-color: #00ff99;
-    }
-
-    .severity-medium .severity-badge {
-      background-color: #ffdd33;
-    }
-
-    .severity-high .severity-badge {
-      background-color: #ff9900;
-    }
-
-    .severity-critical .severity-badge {
-      background-color: #ff3333;
-      color: white;
-    }
-
-    .leak-detail {
-      color: #ddd;
-      margin: 4px 0;
-    }
-
-    .fragmentation-panel {
-      background-color: #181818;
-      border-radius: 8px;
-      padding: 12px;
-    }
-
-    .fragmentation-header {
-      align-items: center;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 10px;
-    }
-
-    .fragmentation-percent {
-      color: #00ff99;
-      font-size: 22px;
-      font-weight: bold;
-    }
-
-    .fragmentation-bar {
-      background-color: #333;
-      border-radius: 999px;
-      height: 16px;
-      overflow: hidden;
-    }
-
-    .fragmentation-fill {
-      background-color: #00ff99;
-      height: 100%;
-      transition: width 0.2s ease, background-color 0.2s ease;
-      width: 0%;
-    }
-
-    .fragmentation-fill.level-medium {
-      background-color: #ffdd33;
-    }
-
-    .fragmentation-fill.level-high {
-      background-color: #ff9900;
-    }
-
-    .fragmentation-fill.level-critical {
-      background-color: #ff3333;
-    }
-
-    .fragmentation-metrics {
-      display: grid;
-      gap: 8px;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      margin-top: 12px;
-    }
-
-    .fragmentation-metric {
-      background-color: #202020;
-      border-radius: 8px;
-      padding: 10px;
-    }
-
-    .fragmentation-label {
-      color: #aaa;
+    .metric-label {
+      color: var(--muted);
       display: block;
       font-size: 12px;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
     }
 
-    .fragmentation-value {
-      color: #f5f5f5;
+    .metric-value {
+      font-size: 22px;
       font-weight: bold;
+      overflow-wrap: anywhere;
     }
 
-    .hotspot-table-wrap {
-      overflow-x: auto;
+    .table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-top: 14px;
+      max-height: 460px;
+      overflow: auto;
     }
 
-    .hotspot-table {
+    table {
       border-collapse: collapse;
-      min-width: 420px;
+      min-width: 1180px;
       width: 100%;
     }
 
-    .hotspot-table th,
-    .hotspot-table td {
-      border-bottom: 1px solid #333;
-      padding: 10px;
+    th,
+    td {
+      border-bottom: 1px solid var(--border);
+      padding: 9px;
       text-align: left;
+      white-space: nowrap;
     }
 
-    .hotspot-table th {
-      color: #00ff99;
-      font-size: 13px;
+    th {
+      background: #15181c;
+      color: var(--accent);
+      font-size: 12px;
+      position: sticky;
       text-transform: uppercase;
+      top: 0;
+      z-index: 1;
     }
 
-    .hotspot-table td {
-      color: #ddd;
+    td {
+      color: #dce3e8;
+      font-size: 13px;
     }
 
-    .hotspot-table tr:last-child td {
-      border-bottom: none;
-    }
-
-    .metric-line,
-    .event-line,
     .empty-state {
-      color: #ccc;
-      margin: 4px 0;
+      color: var(--muted);
+      padding: 16px;
     }
 
+    .serial-log {
+      background: #0a0c0f;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: #c9d3dc;
+      font-family: Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 14px;
+      max-height: 220px;
+      overflow: auto;
+      padding: 12px;
+      white-space: pre-wrap;
+    }
   </style>
-
 </head>
 
 <body>
+  <main>
+    <header>
+      <h1>mleak-rt Data Collector</h1>
+      <p class="subtitle">Collect real runtime memory metrics from Arduino Uno or ESP32 over USB using the Web Serial API.</p>
+    </header>
 
-  <h1>Arduino Memory Leak Detector</h1>
+    <section class="panel">
+      <div class="toolbar">
+        <button id="startButton" type="button">Start Collection</button>
+        <button id="stopButton" class="danger" type="button" disabled>Stop Collection</button>
+        <button id="exportButton" class="secondary" type="button" disabled>Export CSV</button>
 
-  <div class="toolbar">
+        <div class="control">
+          <label for="labelSelect">Label</label>
+          <select id="labelSelect">
+            <option value="NORMAL">NORMAL</option>
+            <option value="LEAK">LEAK</option>
+            <option value="GROWING_LEAK">GROWING_LEAK</option>
+            <option value="FRAGMENTED">FRAGMENTED</option>
+          </select>
+        </div>
+      </div>
 
-    <button id="connectButton" onclick="connectArduino()">Connect Arduino</button>
+      <p id="supportWarning" class="support-warning">Web Serial is not available in this browser. Use Chrome or Edge over HTTPS or localhost.</p>
+    </section>
 
-    <select id="reportFormat" aria-label="Report format">
-      <option value="json">JSON</option>
-      <option value="txt">TXT</option>
-    </select>
+    <section class="panel">
+      <div class="status-strip">
+        <h2>Live Runtime Metrics</h2>
+        <div id="connectionStatus" class="status">DISCONNECTED</div>
+      </div>
 
-    <button onclick="downloadReport()">Download Report</button>
+      <div class="metric-grid">
+        <div class="metric-card"><span class="metric-label">allocSize</span><span id="allocSize" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">allocFrequency</span><span id="allocFrequency" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">reallocCount</span><span id="reallocCount" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">grewByRealloc</span><span id="grewByRealloc" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">activeAllocations</span><span id="activeAllocations" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">largestAllocation</span><span id="largestAllocation" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">totalAllocatedBytes</span><span id="totalAllocatedBytes" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">totalFreedBytes</span><span id="totalFreedBytes" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">fragmentationPercent</span><span id="fragmentationPercent" class="metric-value">0</span></div>
+        <div class="metric-card"><span class="metric-label">Samples</span><span id="sampleCount" class="metric-value">0</span></div>
+      </div>
+    </section>
 
-  </div>
+    <section class="panel">
+      <h2>Collected Samples</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>allocSize</th>
+              <th>allocFrequency</th>
+              <th>reallocCount</th>
+              <th>grewByRealloc</th>
+              <th>activeAllocations</th>
+              <th>largestAllocation</th>
+              <th>totalAllocatedBytes</th>
+              <th>totalFreedBytes</th>
+              <th>fragmentationPercent</th>
+              <th>label</th>
+              <th>timestamp</th>
+            </tr>
+          </thead>
+          <tbody id="sampleTableBody">
+            <tr><td class="empty-state" colspan="12">No samples collected yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
-  <div class="box">
+    <section class="panel">
+      <h2>Raw Serial Output</h2>
+      <pre id="serialLog" class="serial-log">Waiting for serial data...</pre>
+    </section>
+  </main>
 
-    <h2>Memory Report</h2>
-
-    <div id="output" class="dashboard-output">
-No Arduino Data Yet
-    </div>
-
-</div>
-
-<div class="box">
-
-    <h2>Test Your Own Code</h2>
-
-    <textarea id="userCode" rows="10" cols="60"></textarea>
-
-    <br><br>
-
-    <button onclick="analyzeCode()">
-        Analyze Code
-    </button>
-
-    <h3>Analysis Result:</h3>
-
-    <pre id="analysisOutput"></pre>
-
-</div>
-
-<script src="script.js"></script>
+  <script src="script.js"></script>
 </body>
 
 </html>

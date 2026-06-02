@@ -129,6 +129,8 @@ void runBenchmarks();
 
 void printAllocationHotspots();
 
+void printMLFeatures();
+
 #ifdef __cplusplus
 }
 #endif

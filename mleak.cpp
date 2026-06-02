@@ -95,7 +95,6 @@ struct HotspotRecord {
 };
 
 HotspotRecord hotspots[MLEAK_MAX_RECORDS];
-
 int recordIndex = 0;
 int hotspotCount = 0;
 int reallocCalls = 0;
@@ -729,5 +728,74 @@ void printAllocationHotspots() {
     MLEAK_PRINTLN(hotspots[slot].bytesAllocated);
 
     MLEAK_PRINTLN("------------------");
+  }
+}
+
+void printMLFeatures() {
+
+  unsigned long activeBytes = 0;
+  int largestActive = 0;
+  float fragmentationPercent = 0.0;
+  int printed = 0;
+
+  for(int i = 0; i < MLEAK_MAX_RECORDS; i++) {
+
+    if(records[i].address != NULL && records[i].freed == false) {
+
+      activeBytes += (unsigned long)records[i].size;
+
+      if(records[i].size > largestActive) {
+
+        largestActive = records[i].size;
+      }
+    }
+  }
+
+  if(activeBytes > 0 && largestActive > 0) {
+
+    fragmentationPercent = ((activeBytes - largestActive) * 100.0) / activeBytes;
+  }
+
+  for(int i = 0; i < MLEAK_MAX_RECORDS; i++) {
+
+    if(records[i].address != NULL && records[i].freed == false) {
+
+      MLEAK_PRINT("ML,");
+      MLEAK_PRINT(records[i].size);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(allocationFrequency(records[i].callerAddress));
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(records[i].reallocCount);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(records[i].grewByRealloc ? 1 : 0);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(activeAllocations);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(largestAllocation);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(totalAllocatedBytes);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT(totalFreedBytes);
+      MLEAK_PRINT(",");
+      MLEAK_PRINT_FLOAT(fragmentationPercent, 1);
+      MLEAK_PRINTLN("");
+
+      printed++;
+    }
+  }
+
+  if(printed == 0) {
+
+    MLEAK_PRINT("ML,0,0,0,0,");
+    MLEAK_PRINT(activeAllocations);
+    MLEAK_PRINT(",");
+    MLEAK_PRINT(largestAllocation);
+    MLEAK_PRINT(",");
+    MLEAK_PRINT(totalAllocatedBytes);
+    MLEAK_PRINT(",");
+    MLEAK_PRINT(totalFreedBytes);
+    MLEAK_PRINT(",");
+    MLEAK_PRINT_FLOAT(fragmentationPercent, 1);
+    MLEAK_PRINTLN("");
   }
 }
